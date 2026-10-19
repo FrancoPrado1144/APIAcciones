@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  postgres-app:
+    image: postgres:16
+    container_name: postgres-app
+    environment:
+      POSTGRES_DB: admin
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_app_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: gateway
+    ports:
+      - "9000:8080"
+    depends_on:
+      ms-transaccion:
+        condition: service_started
+      ms-portfolio:
+        condition: service_started
+      ms-cotizacion:
+        condition: service_started
+
+
+  postgres-keycloak:
+    image: postgres:16
+    container_name: postgres-keycloak
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak123
+    ports:
+      #no hace falta si no lo voy a consultar solo desde afuera, pero lo dejo por si acaso
+      - "5432:5432"
+    volumes:
+      - postgres_keycloak_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    container_name: keycloak
+    command: start-dev --import-realm
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres-keycloak
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak123
+
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      postgres-keycloak:
+        condition: service_healthy
+
+  ms-transaccion:
+    build:
+      context: ./ms-transaccion
+      dockerfile: Dockerfile
+    container_name: ms-transaccion
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-app:5432/admin
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: admin123
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/tpi-backend
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/tpi-backend/protocol/openid-connect/certs
+      PORTFOLIO_SERVICE_URL: http://ms-portfolio:8082
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+      ms-portfolio:
+        condition: service_started
+
+  ms-portfolio:
+    build:
+      context: ./ms-portfolio
+      dockerfile: Dockerfile
+    container_name: ms-portfolio
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-app:5432/admin
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: admin123
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/tpi-backend
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/tpi-backend/protocol/openid-connect/certs
+      COTIZACION_SERVICE_URL: http://ms-cotizacion:8083
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres-app:
+        condition: service_healthy
+
+  ms-cotizacion:
+    build:
+      context: ./ms-cotizacion
+      dockerfile: Dockerfile
+    container_name: ms-cotizacion
+    ports:
+      - "8083:8083"
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: promtail
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - loki
+
+volumes:
+    postgres_app_data:
+    postgres_keycloak_data:
